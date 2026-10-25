@@ -22,6 +22,11 @@ class BanditTester:
         self.debug = debug
         self.nosec_lines = nosec_lines
         self.metrics = metrics
+        self.filename = None
+        # nosec comments that were used to skip something, and the tests
+        # that were actually run against this file
+        self.used_nosecs = set()
+        self.tested_lines = set()
 
     def run_tests(self, raw_context, checktype):
         """Runs all tests for a certain type of check, for example
@@ -45,6 +50,9 @@ class BanditTester:
             name = test.__name__
             # execute test with an instance of the context class
             temp_context = copy.copy(raw_context)
+            self.filename = temp_context.get("filename", self.filename)
+            for lineno in temp_context.get("linerange", ()):
+                self.tested_lines.add((lineno, test._test_id))
             context = b_context.Context(temp_context)
             try:
                 if hasattr(test, "_config"):
@@ -91,6 +99,16 @@ class BanditTester:
                                 f"skipped, nosec for test {result.test_id}"
                             )
                             self.metrics.note_skipped_test()
+                            for lineno in [
+                                *temp_context["linerange"],
+                                result.lineno,
+                            ]:
+                                if result.test_id in self.nosec_lines.get(
+                                    lineno, ()
+                                ):
+                                    self.used_nosecs.add(
+                                        (lineno, result.test_id)
+                                    )
                             continue
 
                     self.results.append(result)
@@ -102,20 +120,6 @@ class BanditTester:
                     con = constants.RANKING.index(result.confidence)
                     val = constants.RANKING_VALUES[result.confidence]
                     scores["CONFIDENCE"][con] += val
-                else:
-                    nosec_tests_to_skip = self._get_nosecs_from_contexts(
-                        temp_context
-                    )
-                    if (
-                        nosec_tests_to_skip
-                        and test._test_id in nosec_tests_to_skip
-                    ):
-                        LOG.warning(
-                            f"nosec encountered ({test._test_id}), but no "
-                            f"failed test on file "
-                            f"{temp_context['filename']}:"
-                            f"{temp_context['lineno']}"
-                        )
 
             except Exception as e:
                 self.report_error(name, context, e)
@@ -152,6 +156,35 @@ class BanditTester:
             nosec_tests_to_skip.update(context_tests)
 
         return nosec_tests_to_skip
+
+    def report_unused_nosecs(self):
+        """Report nosec comments that did not skip any issue in the file.
+
+        The check is done once per file, after the whole file has been
+        visited, so that a comment is not reported just because a test ran
+        on an unrelated node that happens to share the line range of the
+        comment - which is what happens for strings inside multi-line
+        statements.
+        """
+        if self.filename is None:
+            return
+        for lineno, tests in sorted(self.nosec_lines.items()):
+            if not tests:
+                # a blanket nosec comment has no test id to report
+                continue
+            for test_id in sorted(tests):
+                if (lineno, test_id) in self.used_nosecs:
+                    continue
+                if (lineno, test_id) not in self.tested_lines:
+                    # the comment is not used by any test that ran in this
+                    # file, which the tester cannot attribute to a line
+                    continue
+                LOG.warning(
+                    f"nosec encountered ({test_id}), but no "
+                    f"failed test on file "
+                    f"{self.filename}:"
+                    f"{lineno}"
+                )
 
     @staticmethod
     def report_error(test, context, error):

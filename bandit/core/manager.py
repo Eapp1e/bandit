@@ -363,6 +363,7 @@ class BanditManager:
         )
 
         score = res.process(data)
+        res.tester.report_unused_nosecs()
         self.results.extend(res.tester.results)
         return score
 
